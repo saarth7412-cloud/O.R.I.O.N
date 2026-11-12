@@ -1,6 +1,7 @@
 """Fake O.R.I.O.N. backend for testing the HUD.
 
 Sends a rotating state message to every client connected to ws://127.0.0.1:8765/events.
+Includes voice states ("listening", "transcribing") to test the voice indicator.
 Stop it with Control + C to test the HUD's reconnect behavior.
 """
 import asyncio
@@ -10,10 +11,12 @@ import json
 import websockets
 
 SCRIPT = [
-    ("Online", "Scanning the workspace"),
-    ("Standby", "Waiting for input"),
-    ("Online", "Thinking through your request"),
-    ("Online", "Running a task"),
+    ("online", "Scanning the workspace"),
+    ("standby", "Waiting for input"),
+    ("listening", "Listening for your voice"),
+    ("transcribing", "Turning speech into text"),
+    ("online", "Thinking through your request"),
+    ("online", "Running a task"),
 ]
 
 

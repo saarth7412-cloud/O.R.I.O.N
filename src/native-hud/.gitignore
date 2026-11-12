@@ -1,0 +1,5 @@
+# Swift Package Manager build output
+.build/
+.swiftpm/
+*.xcodeproj
+.DS_Store

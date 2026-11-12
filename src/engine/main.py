@@ -7,15 +7,17 @@ Endpoints:
   POST /command   parses and routes one command
   WS   /events    broadcasts execution events to the HUD
 
-Command routing (the prompt field decides what happens):
-  "open <App Name>"             -> automation.open_app()
-  "shortcut <Name> | <input>"   -> automation.run_shortcut() ("| <input>" is optional)
-  include_screen = true         -> vision_core: screenshot + Ollama VLM answer
+Routing, checked in this order:
+  "help", "time", "date"         -> built-in, answered instantly, no model
+  "open <App Name>"              -> automation.open_app()
+  "shortcut <Name> | <input>"    -> automation.run_shortcut() ("| <input>" is optional)
+  include_screen = true          -> vision_core: screenshot + vision model
+  anything else (chat_default)   -> text_core: small text-only model, no screenshot
 
 HUD state events ({"type": "state", "state": ...}):
-  thinking   parsing the command, or waiting on the vision model
+  thinking   parsing the command, or waiting on a model
   executing  running an AppleScript or Shortcut
-  idle       the command finished, successfully or not
+  standby    the command finished, successfully or not (resting state)
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
 from automation import open_app, run_shortcut
+from text_core import query_text
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -37,6 +40,7 @@ PORT = 8765
 OPEN_PREFIX = "open "
 SHORTCUT_PREFIX = "shortcut "
 SHORTCUT_INPUT_SEPARATOR = "|"
+BUILTIN_COMMANDS = {"help", "time", "date"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +73,7 @@ class CommandError(ValueError):
 
 @dataclass(frozen=True)
 class Route:
-    kind: Literal["open_app", "shortcut", "screen"]
+    kind: Literal["builtin", "open_app", "shortcut", "screen", "chat_default"]
     target: str
     payload: Optional[str] = None
 
@@ -118,14 +122,31 @@ class EventHub:
 
 
 hub = EventHub()
-app = FastAPI(title="O.R.I.O.N. Engine", version="0.2.0")
+app = FastAPI(title="O.R.I.O.N. Engine", version="0.3.0")
 
 
 async def set_state(
     command_id: str,
-    state: Literal["thinking", "executing", "idle"],
+    state: Literal["thinking", "executing", "standby"],
 ) -> None:
     await hub.broadcast({"type": "state", "state": state, "command_id": command_id})
+
+
+# ---------------------------------------------------------------------------
+# Built-in commands (instant, no model)
+# ---------------------------------------------------------------------------
+def run_builtin(name: str) -> str:
+    now = datetime.now().astimezone()
+    if name == "time":
+        return now.strftime("%-I:%M %p")
+    if name == "date":
+        return now.strftime("%A, %B %-d, %Y")
+    if name == "help":
+        return (
+            "Try: 'open <App Name>', 'shortcut <Name> | <input>', 'time', 'date', "
+            "or ask any question. Add include_screen true to ask about your screen."
+        )
+    raise CommandError(f"Unknown built-in command: {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +157,16 @@ def parse_route(req: CommandRequest) -> Route:
     prompt = req.prompt.strip()
     lowered = prompt.lower()
 
-    if lowered.startswith(OPEN_PREFIX):
+    if lowered in BUILTIN_COMMANDS:
+        return Route(kind="builtin", target=lowered)
+
+    if lowered == OPEN_PREFIX.strip() or lowered.startswith(OPEN_PREFIX):
         app_name = prompt[len(OPEN_PREFIX):].strip()
         if not app_name:
             raise CommandError("'open' needs an app name, for example: open Finder")
         return Route(kind="open_app", target=app_name)
 
-    if lowered.startswith(SHORTCUT_PREFIX):
+    if lowered == SHORTCUT_PREFIX.strip() or lowered.startswith(SHORTCUT_PREFIX):
         body = prompt[len(SHORTCUT_PREFIX):].strip()
         name, separator, shortcut_input = body.partition(SHORTCUT_INPUT_SEPARATOR)
         name = name.strip()
@@ -156,14 +180,14 @@ def parse_route(req: CommandRequest) -> Route:
     if req.include_screen:
         return Route(kind="screen", target=prompt)
 
-    raise CommandError(
-        "Unrecognized command. Try 'open <App Name>', 'shortcut <Name> | <input>', "
-        "or send include_screen=true with a question about the screen."
-    )
+    return Route(kind="chat_default", target=prompt)
 
 
 async def execute_route(command_id: str, route: Route) -> str:
     """Run a routed command and return its text output."""
+    if route.kind == "builtin":
+        return run_builtin(route.target)
+
     if route.kind == "open_app":
         await set_state(command_id, "executing")
         output = await asyncio.to_thread(open_app, route.target)
@@ -173,6 +197,10 @@ async def execute_route(command_id: str, route: Route) -> str:
         await set_state(command_id, "executing")
         output = await asyncio.to_thread(run_shortcut, route.target, route.payload)
         return output or f"Shortcut '{route.target}' finished."
+
+    if route.kind == "chat_default":
+        # Conversational fallback: text-only model, no screenshot, no image.
+        return await asyncio.to_thread(query_text, route.target)
 
     # Screen route. Lazy import so the server still boots if vision deps are broken.
     from vision_core import capture_screen_base64, query_vlm
@@ -246,7 +274,7 @@ async def submit_command(req: CommandRequest) -> CommandResponse:
         })
         return CommandResponse(command_id=command_id, status="COMPLETED", output=output)
     finally:
-        await set_state(command_id, "idle")
+        await set_state(command_id, "standby")
 
 
 @app.websocket("/events")
@@ -257,7 +285,7 @@ async def events(ws: WebSocket) -> None:
             "type": "hello",
             "service": "orion-engine",
             "version": app.version,
-            "state": "idle",
+            "state": "standby",
         })
         # Client messages are ignored; the loop exists to detect disconnects.
         while True:

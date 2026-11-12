@@ -13,7 +13,6 @@ final class HUDStatusModel: ObservableObject {
     static let standardStates: [String: String] = [
         "online": "Online",
         "standby": "Standby",
-        "idle": "Standby",
         "listening": "Listening",
         "transcribing": "Transcribing",
         "thinking": "Thinking",

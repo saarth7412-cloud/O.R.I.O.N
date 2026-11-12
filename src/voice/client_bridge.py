@@ -56,11 +56,16 @@ def resolve_url() -> str:
     )
 
 
+def clean_prompt(text: str) -> str:
+    """Remove stray trailing punctuation and extra spaces that Whisper adds to short phrases."""
+    return re.sub(r"\s+", " ", text).strip().rstrip(".,!?;:").strip()
+
+
 def send_command(prompt: str, include_screen: bool, url: str) -> str:
     """POST one command to the engine and return its output text."""
     payload = {
         "source": SOURCE_NAME,
-        "prompt": prompt,
+        "prompt": clean_prompt(prompt),
         "include_screen": include_screen,
     }
     try:

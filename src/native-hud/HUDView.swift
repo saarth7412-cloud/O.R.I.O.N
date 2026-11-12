@@ -9,6 +9,29 @@ final class HUDStatusModel: ObservableObject {
     @Published var source: String = ""
     @Published var isConnected: Bool = false
 
+    /// Standard states, keyed by lowercase name, with the display name shown in the HUD.
+    static let standardStates: [String: String] = [
+        "online": "Online",
+        "standby": "Standby",
+        "idle": "Standby",
+        "listening": "Listening",
+        "transcribing": "Transcribing",
+        "thinking": "Thinking",
+        "offline": "Offline",
+    ]
+
+    /// Engine event types that map onto a HUD state.
+    private static let engineEventStates: [String: String] = [
+        "hello": "Online",
+        "command.received": "Thinking",
+        "command.routing": "Thinking",
+        "screen.capturing": "Thinking",
+        "screen.captured": "Thinking",
+        "vlm.querying": "Thinking",
+        "command.completed": "Online",
+        "command.failed": "Online",
+    ]
+
     /// Backend states that mean the microphone is active or speech is being transcribed.
     static let voiceStates: Set<String> = ["listening", "transcribing"]
 
@@ -16,13 +39,47 @@ final class HUDStatusModel: ObservableObject {
         Self.voiceStates.contains(status.lowercased())
     }
 
-    /// Applies a state message received from the backend.
+    /// Returns the display name for a standard state, or the raw value if it is not standard.
+    static func displayName(for raw: String) -> String {
+        standardStates[raw.lowercased()] ?? raw
+    }
+
+    /// Applies one backend message. Standard `state` messages update the label directly.
+    /// Engine `type` messages are mapped to a state. Unknown types are logged and ignored.
     func apply(_ event: OrionEvent) {
-        status = event.state
-        if let text = event.text, !text.isEmpty {
-            detail = text
+        if let state = event.state, !state.isEmpty {
+            status = Self.displayName(for: state)
+            if let text = event.text, !text.isEmpty {
+                detail = text
+            }
+            source = event.source ?? ""
+            return
         }
-        source = event.source ?? ""
+
+        guard let type = event.type else {
+            NSLog("[O.R.I.O.N.] HUD: message had neither state nor type, ignored")
+            return
+        }
+
+        source = "engine"
+
+        if let mapped = Self.engineEventStates[type] {
+            status = mapped
+        } else {
+            NSLog("[O.R.I.O.N.] HUD: unrecognized event type '\(type)', ignored")
+            return
+        }
+
+        switch type {
+        case "hello":
+            detail = "Connected to \(event.service ?? "engine")"
+        case "command.failed":
+            detail = "Last command failed"
+        case "command.completed":
+            detail = "Last command finished"
+        default:
+            detail = "Working on your command"
+        }
     }
 }
 

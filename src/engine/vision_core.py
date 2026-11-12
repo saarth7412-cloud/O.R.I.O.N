@@ -4,9 +4,14 @@ Screen capture and local Ollama VLM querying.
 
 Capture approach (approved Option 1):
   macOS `screencapture` cannot write image data to /dev/stdout on this
-  machine, so it writes to a short-lived temp file in /tmp. The bytes are
-  read into memory, base64-encoded, and the temp file is deleted in a
-  `finally` block, so the image never persists past the capture call.
+  machine, so it writes to a short-lived temp file in /tmp. The image is
+  shrunk with macOS `sips`, read into memory, base64-encoded, and the temp
+  file is deleted in a `finally` block, so the image never persists past
+  the capture call.
+
+Why the downscale: a full-resolution screenshot is several megapixels, and
+the vision model has to process all of it on every request. Capping the
+longest edge keeps the text readable while cutting response time sharply.
 
 Used by main.py via lazy import:
     from vision_core import capture_screen_base64, query_vlm
@@ -25,17 +30,42 @@ log = logging.getLogger("orion.vision")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 VLM_MODEL = "qwen2-vl"
-VLM_TIMEOUT_SECONDS = 120
+VLM_TIMEOUT_SECONDS = 180
 SCREENCAPTURE_TIMEOUT_SECONDS = 15
+SIPS_TIMEOUT_SECONDS = 15
 TEMP_DIR = "/tmp"
+
+# Longest edge in pixels for the image sent to the model.
+MAX_IMAGE_EDGE_PX = 768
+
+
+def _downscale_in_place(path: str) -> None:
+    """Shrink the image so its longest edge is MAX_IMAGE_EDGE_PX, keeping aspect ratio."""
+    try:
+        result = subprocess.run(
+            ["sips", "-Z", str(MAX_IMAGE_EDGE_PX), path],
+            capture_output=True,
+            timeout=SIPS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("sips not found; this requires macOS") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("sips timed out while resizing the screenshot") from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"sips failed to resize the screenshot (exit {result.returncode}): {stderr or 'no stderr'}"
+        )
 
 
 def capture_screen_base64() -> str:
     """
-    Capture the main display as JPEG via a transient /tmp file and return
-    the image base64-encoded. -x suppresses the shutter sound and -C
-    includes the cursor. The temp file is always removed before returning
-    or raising.
+    Capture the main display as JPEG via a transient /tmp file, shrink it,
+    and return the image base64-encoded. -x suppresses the shutter sound
+    and -C includes the cursor. The temp file is always removed before
+    returning or raising.
     """
     fd, tmp_path = tempfile.mkstemp(prefix="orion_capture_", suffix=".jpg", dir=TEMP_DIR)
     os.close(fd)
@@ -59,15 +89,20 @@ def capture_screen_base64() -> str:
                 f"screencapture failed (exit {result.returncode}): {stderr or 'no stderr'}"
             )
 
-        with open(tmp_path, "rb") as fh:
-            image_bytes = fh.read()
-
-        if not image_bytes:
+        if os.path.getsize(tmp_path) == 0:
             raise RuntimeError(
                 "screencapture produced an empty image; check Screen Recording permission"
             )
 
-        log.debug("captured %d bytes of JPEG", len(image_bytes))
+        _downscale_in_place(tmp_path)
+
+        with open(tmp_path, "rb") as fh:
+            image_bytes = fh.read()
+
+        if not image_bytes:
+            raise RuntimeError("resized screenshot is empty")
+
+        log.debug("captured %d bytes of JPEG after resize", len(image_bytes))
         return base64.b64encode(image_bytes).decode("ascii")
     finally:
         try:

@@ -1,0 +1,18 @@
+# O.R.I.O.N. .gitignore
+# Local-only artifacts: never commit these.
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Voice runtime
+src/voice/voice.env
+*.wav
+
+# Vendored and downloaded binaries (rebuilt by setup_voice_env.sh)
+vendor/
+models/
+
+# macOS
+.DS_Store

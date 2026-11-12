@@ -1,6 +1,12 @@
 """
 O.R.I.O.N. Engine: vision_core.py
-In-memory macOS screen capture and local Ollama VLM querying.
+Screen capture and local Ollama VLM querying.
+
+Capture approach (approved Option 1):
+  macOS `screencapture` cannot write image data to /dev/stdout on this
+  machine, so it writes to a short-lived temp file in /tmp. The bytes are
+  read into memory, base64-encoded, and the temp file is deleted in a
+  `finally` block, so the image never persists past the capture call.
 
 Used by main.py via lazy import:
     from vision_core import capture_screen_base64, query_vlm
@@ -9,7 +15,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import subprocess
+import tempfile
 
 import requests
 
@@ -19,40 +27,53 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 VLM_MODEL = "qwen2-vl"
 VLM_TIMEOUT_SECONDS = 120
 SCREENCAPTURE_TIMEOUT_SECONDS = 15
-SCREENCAPTURE_CMD = ["screencapture", "-x", "-C", "-t", "jpg", "/dev/stdout"]
+TEMP_DIR = "/tmp"
 
 
 def capture_screen_base64() -> str:
     """
-    Capture the main display in memory as JPEG and return it base64-encoded.
-    -x suppresses the shutter sound, -C includes the cursor, and
-    /dev/stdout keeps the image off disk.
+    Capture the main display as JPEG via a transient /tmp file and return
+    the image base64-encoded. -x suppresses the shutter sound and -C
+    includes the cursor. The temp file is always removed before returning
+    or raising.
     """
+    fd, tmp_path = tempfile.mkstemp(prefix="orion_capture_", suffix=".jpg", dir=TEMP_DIR)
+    os.close(fd)
+
     try:
-        result = subprocess.run(
-            SCREENCAPTURE_CMD,
-            capture_output=True,
-            timeout=SCREENCAPTURE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("screencapture binary not found; this requires macOS") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("screencapture timed out") from exc
+        try:
+            result = subprocess.run(
+                ["screencapture", "-x", "-C", "-t", "jpg", tmp_path],
+                capture_output=True,
+                timeout=SCREENCAPTURE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("screencapture binary not found; this requires macOS") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("screencapture timed out") from exc
 
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"screencapture failed (exit {result.returncode}): {stderr or 'no stderr'}"
-        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"screencapture failed (exit {result.returncode}): {stderr or 'no stderr'}"
+            )
 
-    if not result.stdout:
-        raise RuntimeError(
-            "screencapture returned no image data; check Screen Recording permission"
-        )
+        with open(tmp_path, "rb") as fh:
+            image_bytes = fh.read()
 
-    log.debug("captured %d bytes of JPEG", len(result.stdout))
-    return base64.b64encode(result.stdout).decode("ascii")
+        if not image_bytes:
+            raise RuntimeError(
+                "screencapture produced an empty image; check Screen Recording permission"
+            )
+
+        log.debug("captured %d bytes of JPEG", len(image_bytes))
+        return base64.b64encode(image_bytes).decode("ascii")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def query_vlm(prompt: str, image_b64: str) -> str:

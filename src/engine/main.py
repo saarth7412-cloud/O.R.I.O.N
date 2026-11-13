@@ -1,46 +1,74 @@
 """
 O.R.I.O.N. Engine: main.py
-FastAPI orchestrator bound to 127.0.0.1:8765.
+FastAPI orchestrator. Binds to 127.0.0.1 on ORION_PORT (default 8765).
 
 Endpoints:
   GET  /health    liveness + connected HUD client count
-  POST /command   parses and routes one command
+  POST /command   parses and routes one command, returns reply and action
+  POST /state     voice bridge pushes a HUD state (listening, transcribing, ...)
   WS   /events    broadcasts execution events to the HUD
 
 Routing, checked in this order:
-  "help", "time", "date"         -> built-in, answered instantly, no model
+  "help", "time", "date"         -> builtin, answered instantly, no model
   "open <App Name>"              -> automation.open_app()
   "shortcut <Name> | <input>"    -> automation.run_shortcut() ("| <input>" is optional)
   include_screen = true          -> vision_core: screenshot + vision model
-  anything else (chat_default)   -> text_core: small text-only model, no screenshot
+  anything else                  -> chat_default: text-only model, no screenshot
 
-HUD state events ({"type": "state", "state": ...}):
-  thinking   parsing the command, or waiting on a model
-  executing  running an AppleScript or Shortcut
-  standby    the command finished, successfully or not (resting state)
+HUD states:
+  standby    resting state: sent on connect and after every command finishes
+  thinking   a command has started
+  executing  an app or Shortcut is running
+  listening, transcribing, online  pushed by the voice bridge via POST /state
+
+Ollama offline: returns HTTP 503 with {"reply": "Local language model is offline..."}.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from automation import open_app, run_shortcut
+from errors import OLLAMA_OFFLINE_MESSAGE, OllamaUnavailableError
 from text_core import query_text
 
 HOST = "127.0.0.1"
-PORT = 8765
+
+
+def _read_port() -> int:
+    raw = os.environ.get("ORION_PORT", "8765")
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"ORION_PORT must be a whole number, got {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"ORION_PORT must be between 1 and 65535, got {port}")
+    return port
+
+
+PORT = _read_port()
 
 OPEN_PREFIX = "open "
 SHORTCUT_PREFIX = "shortcut "
 SHORTCUT_INPUT_SEPARATOR = "|"
 BUILTIN_COMMANDS = {"help", "time", "date"}
+
+ACTION_FOR_ROUTE = {
+    "builtin": "builtin",
+    "open_app": "open_app",
+    "shortcut": "shortcut",
+    "screen": "screen",
+    "chat_default": "chat",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,8 +91,18 @@ class CommandRequest(BaseModel):
 class CommandResponse(BaseModel):
     command_id: str
     status: Literal["COMPLETED", "FAILED"]
-    output: Optional[str] = None
+    reply: Optional[str] = None
+    action: Optional[str] = None
+    output: Optional[str] = None  # same text as reply, kept for older clients
     error: Optional[str] = None
+
+
+class StateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: str = Field(min_length=1, max_length=32)
+    text: str = Field(default="", max_length=2000)
+    source: str = Field(default="voice", min_length=1, max_length=64)
 
 
 class CommandError(ValueError):
@@ -122,14 +160,20 @@ class EventHub:
 
 
 hub = EventHub()
-app = FastAPI(title="O.R.I.O.N. Engine", version="0.3.0")
+app = FastAPI(title="O.R.I.O.N. Engine", version="1.0.0")
 
 
-async def set_state(
-    command_id: str,
-    state: Literal["thinking", "executing", "standby"],
-) -> None:
+async def set_state(command_id: str, state: str) -> None:
     await hub.broadcast({"type": "state", "state": state, "command_id": command_id})
+
+
+@app.exception_handler(OllamaUnavailableError)
+async def ollama_offline_handler(request: Request, exc: OllamaUnavailableError) -> JSONResponse:
+    log.warning("Ollama unavailable: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"status": "FAILED", "reply": OLLAMA_OFFLINE_MESSAGE, "action": None},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +228,7 @@ def parse_route(req: CommandRequest) -> Route:
 
 
 async def execute_route(command_id: str, route: Route) -> str:
-    """Run a routed command and return its text output."""
+    """Run a routed command and return its text reply."""
     if route.kind == "builtin":
         return run_builtin(route.target)
 
@@ -205,7 +249,6 @@ async def execute_route(command_id: str, route: Route) -> str:
     # Screen route. Lazy import so the server still boots if vision deps are broken.
     from vision_core import capture_screen_base64, query_vlm
 
-    await set_state(command_id, "thinking")
     await hub.broadcast({"type": "screen.capturing", "command_id": command_id})
     image_b64 = await asyncio.to_thread(capture_screen_base64)
     await hub.broadcast({"type": "screen.captured", "command_id": command_id})
@@ -219,7 +262,19 @@ async def execute_route(command_id: str, route: Route) -> str:
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "clients": hub.client_count}
+    return {"status": "ok", "clients": hub.client_count, "port": PORT}
+
+
+@app.post("/state")
+async def post_state(req: StateRequest) -> dict:
+    """Let the voice bridge push HUD states such as listening and transcribing."""
+    await hub.broadcast({
+        "type": "state",
+        "state": req.state,
+        "source": req.source,
+        "text": req.text,
+    })
+    return {"status": "ok", "state": req.state}
 
 
 @app.post("/command", response_model=CommandResponse)
@@ -255,6 +310,13 @@ async def submit_command(req: CommandRequest) -> CommandResponse:
                 status_code=400,
                 detail={"command_id": command_id, "error": str(exc)},
             ) from exc
+        except OllamaUnavailableError:
+            await hub.broadcast({
+                "type": "command.failed",
+                "command_id": command_id,
+                "error": OLLAMA_OFFLINE_MESSAGE,
+            })
+            raise  # handled by ollama_offline_handler -> HTTP 503
         except Exception as exc:  # noqa: BLE001
             log.exception("command %s failed", command_id)
             await hub.broadcast({
@@ -272,7 +334,13 @@ async def submit_command(req: CommandRequest) -> CommandResponse:
             "command_id": command_id,
             "output": output,
         })
-        return CommandResponse(command_id=command_id, status="COMPLETED", output=output)
+        return CommandResponse(
+            command_id=command_id,
+            status="COMPLETED",
+            reply=output,
+            action=ACTION_FOR_ROUTE[route.kind],
+            output=output,
+        )
     finally:
         await set_state(command_id, "standby")
 

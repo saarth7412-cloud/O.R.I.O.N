@@ -26,6 +26,7 @@ import tempfile
 
 import requests
 
+from errors import OllamaUnavailableError
 from prompts import SYSTEM_PROMPT
 
 log = logging.getLogger("orion.vision")
@@ -38,7 +39,19 @@ SIPS_TIMEOUT_SECONDS = 15
 TEMP_DIR = "/tmp"
 
 # Longest edge in pixels for the image sent to the model.
-MAX_IMAGE_EDGE_PX = 768
+def _read_max_dim() -> int:
+    """Longest image edge in pixels. Set ORION_VISION_MAX_DIM to override (default 768)."""
+    raw = os.environ.get("ORION_VISION_MAX_DIM", "768")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"ORION_VISION_MAX_DIM must be a whole number, got {raw!r}") from exc
+    if value < 64:
+        raise RuntimeError(f"ORION_VISION_MAX_DIM must be at least 64, got {value}")
+    return value
+
+
+MAX_IMAGE_EDGE_PX = _read_max_dim()
 
 
 def _downscale_in_place(path: str) -> None:
@@ -132,6 +145,8 @@ def query_vlm(prompt: str, image_b64: str) -> str:
 
     try:
         response = requests.post(OLLAMA_URL, json=payload, timeout=VLM_TIMEOUT_SECONDS)
+    except requests.ConnectionError as exc:
+        raise OllamaUnavailableError(f"Cannot reach Ollama at {OLLAMA_URL}") from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"Ollama request failed at {OLLAMA_URL}: {exc}") from exc
 

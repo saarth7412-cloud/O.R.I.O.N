@@ -1,0 +1,9 @@
+# O.R.I.O.N. Engine dependencies
+# Install with: pip install -r requirements.txt
+
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+
+# Used by vision_core.py and text_core.py to talk to Ollama
+requests>=2.31

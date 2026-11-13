@@ -15,6 +15,7 @@ import logging
 
 import requests
 
+from errors import OllamaUnavailableError
 from prompts import SYSTEM_PROMPT
 
 log = logging.getLogger("orion.text")
@@ -42,6 +43,8 @@ def query_text(prompt: str) -> str:
 
     try:
         response = requests.post(OLLAMA_URL, json=payload, timeout=TEXT_TIMEOUT_SECONDS)
+    except requests.ConnectionError as exc:
+        raise OllamaUnavailableError(f"Cannot reach Ollama at {OLLAMA_URL}") from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"Ollama request failed at {OLLAMA_URL}: {exc}") from exc
 

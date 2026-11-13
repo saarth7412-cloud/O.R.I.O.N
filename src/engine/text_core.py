@@ -12,6 +12,7 @@ Used by main.py via lazy import:
 from __future__ import annotations
 
 import logging
+import os
 
 import requests
 
@@ -21,7 +22,7 @@ from prompts import SYSTEM_PROMPT
 log = logging.getLogger("orion.text")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-TEXT_MODEL = "llama3.2:3b"
+TEXT_MODEL = os.environ.get("ORION_TEXT_MODEL", "qwen2.5:7b")
 TEXT_TIMEOUT_SECONDS = 60
 
 # Caps reply length so short questions come back quickly.

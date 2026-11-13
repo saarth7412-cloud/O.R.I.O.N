@@ -99,6 +99,7 @@ Commands are routed in this order:
 - `open <App Name>` opens an app.
 - `shortcut <Name> | <input>` runs a Shortcut. The `| <input>` part is optional.
 - Any request with `include_screen: true` answers a question about the screen.
+- Plain arithmetic, such as `what is 30 times 49` or `2 + 2`, is calculated exactly by the engine. No language model is used, so the answer is always correct.
 - Everything else is a chat question for the text model.
 
 Errors: a bare `open` or `shortcut` returns HTTP 400. If Ollama isn't running, the server returns HTTP 503 with `{"reply": "Local language model is offline. Please start Ollama.", ...}`.
@@ -148,6 +149,25 @@ Quit and reopen that app after granting them. Without these permissions, the hot
 | `ORION_PORT` | `8765` | engine port |
 | `ORION_VISION_MAX_DIM` | `768` | longest screenshot edge in pixels sent to the vision model; lower is faster |
 | `ORION_VENV` | `~/.orion-venv` | environment used by the launcher |
+| `ORION_TEXT_MODEL` | `qwen2.5:7b` | chat model for non-screen questions; see the model benchmark below |
+
+## Chat model benchmark
+
+To compare chat models, change `ORION_TEXT_MODEL`, restart the engine, and run the benchmark:
+
+```bash
+ORION_TEXT_MODEL=qwen2.5:7b ~/orion/scripts/start_orion.sh
+```
+
+In a second tab:
+
+```bash
+cd ~/orion
+source ~/.orion-venv/bin/activate
+ORION_TEXT_MODEL=qwen2.5:7b python tests/bench_chat.py
+```
+
+The benchmark asks fixed factual questions and false-premise questions, then reports accuracy and average latency. It also prints one unknown-fact question for you to judge by hand. Run it once per model and compare the results before changing the default.
 
 ## Git
 

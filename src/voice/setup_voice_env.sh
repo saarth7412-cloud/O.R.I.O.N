@@ -67,7 +67,7 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   python3 -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
-"$VENV_DIR/bin/python" -m pip install --upgrade piper-tts sounddevice numpy requests
+"$VENV_DIR/bin/python" -m pip install --upgrade -r "$VOICE_DIR/requirements.txt"
 
 # 8. Emit environment contract for downstream modules
 cat > "$VOICE_DIR/voice.env" <<ENVEOF
@@ -81,7 +81,7 @@ log "Wrote $VOICE_DIR/voice.env"
 # 9. Verification
 "$WHISPER_DIR/build/bin/whisper-cli" --help >/dev/null 2>&1 \
   && log "whisper-cli: OK" || die "whisper-cli failed to run."
-"$VENV_DIR/bin/python" -c "import piper, sounddevice, numpy, requests; print('python deps: OK')" \
+"$VENV_DIR/bin/python" -c "import piper, sounddevice, numpy, requests, pynput; print('python deps: OK')" \
   || die "Python dependency import failed."
 
 log "Voice workspace bootstrap complete."

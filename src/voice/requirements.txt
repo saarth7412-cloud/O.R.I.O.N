@@ -1,0 +1,7 @@
+# O.R.I.O.N. agent-voice dependencies.
+# Install into the shared venv:  ~/.orion-venv/bin/pip install -r ~/orion/src/voice/requirements.txt
+numpy>=1.26
+sounddevice>=0.4.6
+requests>=2.31
+piper-tts>=1.2
+pynput>=1.7.6

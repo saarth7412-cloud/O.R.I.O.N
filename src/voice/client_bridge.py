@@ -5,10 +5,15 @@ Project O.R.I.O.N. | agent-voice
 Connects speech-in (stt_wrapper) to the engine's POST /command and speech-out (tts_wrapper).
 Reports live voice states to POST /state so the HUD can show them.
 
+Mute toggle (loop mode): press the mute key (default Right Option), in any app, to mute or unmute the
+microphone without stopping the script. Needs Input Monitoring permission on macOS.
+
 Usage:
     python client_bridge.py --text "hello"              # skip the mic, test the engine path
     python client_bridge.py --seconds 5                 # one voice turn
-    python client_bridge.py --loop                      # keep listening until Ctrl+C
+    python client_bridge.py --loop                      # keep listening; Right Option toggles mute
+    python client_bridge.py --loop --mute-key f8        # use a different mute key
+    python client_bridge.py --loop --no-hotkey          # loop without the global key listener
     python client_bridge.py --loop --screen             # send screen context to the local VLM
 """
 from __future__ import annotations
@@ -18,6 +23,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 import requests
@@ -44,6 +50,8 @@ DEFAULT_URL = "http://127.0.0.1:8765/command"
 SOURCE_NAME = "voice"
 REQUEST_TIMEOUT_S = 120       # local VLM calls can be slow
 STATE_TIMEOUT_S = 0.5         # state updates must never hold up the audio loop
+HOTKEY_DEBOUNCE_S = 0.35      # ignore key auto-repeat and double presses
+MUTE_POLL_S = 0.2             # how often the loop checks the mute flag while muted
 ORION_PORT = os.environ.get("ORION_PORT") or "8765"
 STATE_URL = f"http://127.0.0.1:{ORION_PORT}/state"
 
@@ -69,6 +77,86 @@ def _send_state(state: str, text: str) -> None:
 def post_state(state: str, text: str = "") -> None:
     """Fire-and-forget state update on a daemon thread."""
     threading.Thread(target=_send_state, args=(state, text), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Mute control and global hotkey
+# ---------------------------------------------------------------------------
+class MicControl:
+    """Thread-safe mute flag. The hotkey thread toggles it; the audio loop reads it."""
+
+    def __init__(self, key_label: str = "Right Option") -> None:
+        self.key_label = key_label
+        self._muted = threading.Event()
+        self._lock = threading.Lock()
+        self._last_toggle = float("-inf")
+
+    @property
+    def muted(self) -> bool:
+        return self._muted.is_set()
+
+    def toggle(self) -> bool:
+        """Flip the mute state. Returns False if the press was debounced."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_toggle < HOTKEY_DEBOUNCE_S:
+                return False
+            self._last_toggle = now
+            if self._muted.is_set():
+                self._muted.clear()
+                print("[mic] LISTENING. Speak when ready.", flush=True)
+            else:
+                self._muted.set()
+                print(f"[mic] MUTED. Press {self.key_label} to resume.", flush=True)
+                post_state("standby", "muted")
+        return True
+
+
+def start_hotkey_listener(control: MicControl, key_name: str = "alt_r"):
+    """
+    Start a global key listener for F8 and Right Ctrl. Returns the listener,
+    or None if pynput can't be loaded (the loop still runs, without hotkeys).
+    """
+    try:
+        from pynput import keyboard
+    except Exception as exc:  # missing package or unsupported platform
+        print(
+            f"[mic] hotkeys disabled: could not load pynput ({exc}). Ctrl+C still works.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+
+    if not hasattr(keyboard.Key, key_name):
+        raise ValueError(
+            f"Unknown mute key '{key_name}'. Try: alt_r, alt, cmd_r, shift_r, ctrl_r, caps_lock, f1 to f12."
+        )
+    toggle_keys = {getattr(keyboard.Key, key_name)}
+
+    def on_press(key) -> None:
+        if isinstance(key, keyboard.Key) and key in toggle_keys:
+            control.toggle()
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.daemon = True
+    listener.start()
+    return listener
+
+
+def pretty_key_label(name: str) -> str:
+    """Human-readable key name for console messages."""
+    labels = {
+        "alt_r": "Right Option", "alt": "Option", "alt_l": "Left Option",
+        "cmd_r": "Right Command", "cmd": "Command",
+        "shift_r": "Right Shift", "ctrl_r": "Right Control", "caps_lock": "Caps Lock",
+    }
+    if re.fullmatch(r"f\d{1,2}", name):
+        return name.upper()
+    return labels.get(name, name.replace("_", " ").title())
+
+
+def is_muted(control: MicControl | None) -> bool:
+    return control is not None and control.muted
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +239,9 @@ def chunk_text(text: str, limit: int = MAX_CHARS) -> list[str]:
 def handle_turn(prompt: str, include_screen: bool, url: str, speak_aloud: bool) -> None:
     """Send one prompt, print the reply, speak it, then report standby when done."""
     try:
-        print(f"You:   {prompt}")
+        print(f"You:   {prompt}", flush=True)
         reply = send_command(prompt, include_screen, url)
-        print(f"Orion: {reply}")
+        print(f"Orion: {reply}", flush=True)
         if speak_aloud and reply:
             for chunk in chunk_text(reply):
                 speak(chunk)
@@ -173,21 +261,42 @@ def listen_once(seconds: float) -> str:
     return heard
 
 
-def run_loop(seconds: float, include_screen: bool, url: str, speak_aloud: bool) -> None:
-    """Keep listening. Errors on one turn are printed and the loop continues."""
-    print("Listening. Press Ctrl+C to stop.")
+def run_loop(
+    seconds: float,
+    include_screen: bool,
+    url: str,
+    speak_aloud: bool,
+    control: MicControl | None,
+) -> None:
+    """Keep listening. Muted time skips capture. Errors on one turn are printed and the loop continues."""
+    print("Listening. Press Ctrl+C to stop.", flush=True)
+    if control is not None:
+        print(f"Mute toggle: {control.key_label}. Mute takes effect after the current clip ends.", flush=True)
+
     while True:
+        if is_muted(control):
+            time.sleep(MUTE_POLL_S)
+            continue
+
         try:
             heard = listen_once(seconds)
         except STTRuntimeError as exc:
-            print(f"[bridge] mic/transcription error: {exc}", file=sys.stderr)
+            print(f"[bridge] mic/transcription error: {exc}", file=sys.stderr, flush=True)
             continue
+
+        if is_muted(control):
+            # Muted while this clip was being captured: drop it.
+            print("[mic] clip discarded (muted during capture).", flush=True)
+            post_state("standby")
+            continue
+
         if not heard:
             continue
+
         try:
             handle_turn(heard, include_screen, url, speak_aloud)
         except (BridgeError, TTSRuntimeError, ValueError) as exc:
-            print(f"[bridge] ERROR: {exc}", file=sys.stderr)
+            print(f"[bridge] ERROR: {exc}", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,17 +309,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--loop", action="store_true", help="Keep listening until Ctrl+C.")
     parser.add_argument("--screen", action="store_true", help="Include screen context (needs Ollama).")
     parser.add_argument("--no-speak", action="store_true", help="Print replies without speaking them.")
+    parser.add_argument("--no-hotkey", action="store_true", help="Loop mode without the mute toggle.")
+    parser.add_argument("--mute-key", default="alt_r", help="Key that toggles mute (default alt_r = Right Option).")
     parser.add_argument("--url", default=None, help="Override the engine URL.")
     args = parser.parse_args(argv)
 
     url = args.url or resolve_url()
     speak_aloud = not args.no_speak
+    control: MicControl | None = None
 
     try:
         if args.text is not None:
             handle_turn(args.text, args.screen, url, speak_aloud)
         elif args.loop:
-            run_loop(args.seconds, args.screen, url, speak_aloud)
+            if not args.no_hotkey:
+                control = MicControl(pretty_key_label(args.mute_key))
+                start_hotkey_listener(control, args.mute_key)
+            run_loop(args.seconds, args.screen, url, speak_aloud, control)
         else:
             heard = listen_once(args.seconds)
             if not heard:
@@ -218,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             handle_turn(heard, args.screen, url, speak_aloud)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nStopped.", flush=True)
         return 0
     except STTSetupError as exc:
         print(f"[bridge] SETUP REQUIRED (speech input): {exc}", file=sys.stderr)

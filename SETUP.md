@@ -9,6 +9,7 @@ Open System Settings → Privacy & Security and allow your terminal app (Termina
 - **Microphone**: needed for voice input. macOS asks the first time; click Allow.
 - **Screen Recording**: needed for `--screen` (the engine captures your screen). Quit and reopen the terminal after granting it.
 - **Accessibility**: needed for AppleScript app control, such as "open calculator".
+- **Input Monitoring**: needed for the mute toggle (Right Option by default). If the toggle does nothing, allow your terminal here, then quit and reopen it.
 
 If something stops working later, come back here first.
 
@@ -26,7 +27,8 @@ rm -rf ~/orion/src/voice/.venv ~/orion/src/engine/.venv
 python3.12 -m venv ~/.orion-venv
 source ~/.orion-venv/bin/activate
 pip install --upgrade pip
-pip install fastapi "uvicorn[standard]" pydantic requests numpy sounddevice piper-tts
+pip install fastapi "uvicorn[standard]" pydantic
+pip install -r ~/orion/src/voice/requirements.txt
 ```
 
 If `python3.12` isn't found, install it with `brew install python@3.12`.
@@ -98,6 +100,12 @@ With the engine running:
 # Command path. Calculator should open.
 ~/.orion-venv/bin/python ~/orion/src/voice/client_bridge.py --text "open calculator"
 ```
+
+## Mute toggle
+
+While the loop runs, press **Right Option** (the Option key on the right side of the space bar) in any app to mute or unmute the microphone. The script keeps running. The console shows `[mic] MUTED` or `[mic] LISTENING`.
+
+Muting takes effect after the current 5-second clip ends. Shorter clips respond faster: `--seconds 3`. Use `--no-hotkey` to turn the toggle off. To use another key, add `--mute-key f8` (or `alt`, `cmd_r`, `caps_lock`).
 
 ## Troubleshooting
 

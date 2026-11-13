@@ -3,12 +3,13 @@
 client_bridge.py
 Project O.R.I.O.N. | agent-voice
 Connects speech-in (stt_wrapper) to the engine's POST /command and speech-out (tts_wrapper).
+Reports live voice states to POST /state so the HUD can show them.
 
 Usage:
-    python client_bridge.py --text "hello engine"     # skip the mic, test the engine path
-    python client_bridge.py --seconds 5               # one voice turn
-    python client_bridge.py --loop                    # keep listening until Ctrl+C
-    python client_bridge.py --loop --screen           # send screen context to the local VLM
+    python client_bridge.py --text "hello"              # skip the mic, test the engine path
+    python client_bridge.py --seconds 5                 # one voice turn
+    python client_bridge.py --loop                      # keep listening until Ctrl+C
+    python client_bridge.py --loop --screen             # send screen context to the local VLM
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import argparse
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 import requests
@@ -41,12 +43,37 @@ from tts_wrapper import (  # noqa: E402
 DEFAULT_URL = "http://127.0.0.1:8765/command"
 SOURCE_NAME = "voice"
 REQUEST_TIMEOUT_S = 120       # local VLM calls can be slow
+STATE_TIMEOUT_S = 0.5         # state updates must never hold up the audio loop
+ORION_PORT = os.environ.get("ORION_PORT") or "8765"
+STATE_URL = f"http://127.0.0.1:{ORION_PORT}/state"
 
 
 class BridgeError(RuntimeError):
     """Raised when the engine cannot be reached or returns a failure."""
 
 
+# ---------------------------------------------------------------------------
+# HUD state reporting
+# ---------------------------------------------------------------------------
+def _send_state(state: str, text: str) -> None:
+    try:
+        requests.post(
+            STATE_URL,
+            json={"state": state, "text": text, "source": SOURCE_NAME},
+            timeout=STATE_TIMEOUT_S,
+        )
+    except Exception:  # a HUD hiccup must never stall or crash the audio loop
+        pass
+
+
+def post_state(state: str, text: str = "") -> None:
+    """Fire-and-forget state update on a daemon thread."""
+    threading.Thread(target=_send_state, args=(state, text), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Engine calls
+# ---------------------------------------------------------------------------
 def resolve_url() -> str:
     """Process environment overrides voice.env, which overrides the default."""
     return (
@@ -73,9 +100,7 @@ def send_command(prompt: str, include_screen: bool, url: str) -> str:
     except requests.ConnectionError as exc:
         raise BridgeError(
             f"Can't reach the engine at {url}.\n"
-            "Fix: start it in its own Terminal tab with:\n"
-            "  cd ~/orion/src/engine && source .venv/bin/activate && "
-            "uvicorn main:app --host 127.0.0.1 --port 8765"
+            "Fix: start it with ~/orion/start_engine.sh"
         ) from exc
     except requests.Timeout as exc:
         raise BridgeError(f"The engine took longer than {REQUEST_TIMEOUT_S}s to respond.") from exc
@@ -93,6 +118,9 @@ def send_command(prompt: str, include_screen: bool, url: str) -> str:
     return (data.get("output") or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# Speech output
+# ---------------------------------------------------------------------------
 def chunk_text(text: str, limit: int = MAX_CHARS) -> list[str]:
     """Split a long reply into speakable pieces, breaking at sentence ends where possible."""
     pieces: list[str] = []
@@ -117,14 +145,32 @@ def chunk_text(text: str, limit: int = MAX_CHARS) -> list[str]:
     return chunks
 
 
+# ---------------------------------------------------------------------------
+# Turns and listening
+# ---------------------------------------------------------------------------
 def handle_turn(prompt: str, include_screen: bool, url: str, speak_aloud: bool) -> None:
-    """Send one prompt, print the reply, and speak it unless disabled."""
-    print(f"You:   {prompt}")
-    reply = send_command(prompt, include_screen, url)
-    print(f"Orion: {reply}")
-    if speak_aloud and reply:
-        for chunk in chunk_text(reply):
-            speak(chunk)
+    """Send one prompt, print the reply, speak it, then report standby when done."""
+    try:
+        print(f"You:   {prompt}")
+        reply = send_command(prompt, include_screen, url)
+        print(f"Orion: {reply}")
+        if speak_aloud and reply:
+            for chunk in chunk_text(reply):
+                speak(chunk)
+    finally:
+        post_state("standby")
+
+
+def listen_once(seconds: float) -> str:
+    """Record one clip and return the transcript. Reports listening/transcribing/standby."""
+    try:
+        heard = listen_and_transcribe(seconds, on_stage=post_state)
+    except Exception:
+        post_state("standby")
+        raise
+    if not heard:
+        post_state("standby")  # silence or nothing recognized
+    return heard
 
 
 def run_loop(seconds: float, include_screen: bool, url: str, speak_aloud: bool) -> None:
@@ -132,12 +178,12 @@ def run_loop(seconds: float, include_screen: bool, url: str, speak_aloud: bool) 
     print("Listening. Press Ctrl+C to stop.")
     while True:
         try:
-            heard = listen_and_transcribe(seconds)
+            heard = listen_once(seconds)
         except STTRuntimeError as exc:
             print(f"[bridge] mic/transcription error: {exc}", file=sys.stderr)
             continue
         if not heard:
-            continue  # silence, or nothing recognized
+            continue
         try:
             handle_turn(heard, include_screen, url, speak_aloud)
         except (BridgeError, TTSRuntimeError, ValueError) as exc:
@@ -166,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.loop:
             run_loop(args.seconds, args.screen, url, speak_aloud)
         else:
-            heard = listen_and_transcribe(args.seconds)
+            heard = listen_once(args.seconds)
             if not heard:
                 print("Didn't catch anything. Try again and speak a little louder.")
                 return 0

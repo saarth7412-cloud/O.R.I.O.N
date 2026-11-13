@@ -17,6 +17,8 @@ models/
 # macOS
 .DS_Store
 
-# Swift build artifacts
+# Swift build output (native-hud)
 .build/
-.swiftpm/
+
+# Local session logs
+logs/

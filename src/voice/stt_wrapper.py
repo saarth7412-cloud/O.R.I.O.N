@@ -18,6 +18,7 @@ import sys
 import tempfile
 import wave
 from dataclasses import dataclass
+from typing import Callable
 from pathlib import Path
 
 import numpy as np
@@ -101,7 +102,7 @@ def ensure_ready(config: STTConfig) -> None:
     if sd is None:
         raise STTSetupError(
             "Python package 'sounddevice' is missing.\n"
-            f"Fix: {VOICE_DIR / '.venv' / 'bin' / 'python'} -m pip install sounddevice numpy"
+            f"Fix: {Path.home() / '.orion-venv' / 'bin' / 'python'} -m pip install sounddevice numpy"
         )
 
     if not config.whisper_cli.is_file() or not os.access(config.whisper_cli, os.X_OK):
@@ -197,11 +198,29 @@ def transcribe_file(wav_path: Path, config: STTConfig | None = None) -> str:
     return clean_transcript(result.stdout)
 
 
-def listen_and_transcribe(seconds: float = DEFAULT_SECONDS) -> str:
-    """Record one clip from the microphone and return its cleaned transcript."""
+def _notify(on_stage, stage: str) -> None:
+    """Report a pipeline stage to an optional callback. Callback errors never stop audio."""
+    if on_stage is None:
+        return
+    try:
+        on_stage(stage)
+    except Exception:
+        pass
+
+
+def listen_and_transcribe(
+    seconds: float = DEFAULT_SECONDS,
+    on_stage: Callable[[str], None] | None = None,
+) -> str:
+    """Record one clip from the microphone and return its cleaned transcript.
+
+    on_stage, if given, is called with 'listening' before capture and
+    'transcribing' before Whisper runs.
+    """
     config = load_config()
     ensure_ready(config)
 
+    _notify(on_stage, "listening")
     audio = record_clip(seconds)
     peak = int(np.max(np.abs(audio))) if audio.size else 0
     if peak < SILENCE_PEAK_THRESHOLD:
@@ -212,6 +231,7 @@ def listen_and_transcribe(seconds: float = DEFAULT_SECONDS) -> str:
     tmp_path = Path(tmp_name)
     try:
         write_wav(tmp_path, audio)
+        _notify(on_stage, "transcribing")
         return transcribe_file(tmp_path, config)
     finally:
         tmp_path.unlink(missing_ok=True)

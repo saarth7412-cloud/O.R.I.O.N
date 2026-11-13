@@ -26,6 +26,8 @@ import tempfile
 
 import requests
 
+from prompts import SYSTEM_PROMPT
+
 log = logging.getLogger("orion.vision")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -123,6 +125,7 @@ def query_vlm(prompt: str, image_b64: str) -> str:
     payload = {
         "model": VLM_MODEL,
         "prompt": prompt,
+        "system": SYSTEM_PROMPT,
         "images": [image_b64],
         "stream": False,
     }

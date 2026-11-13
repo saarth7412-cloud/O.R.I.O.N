@@ -12,6 +12,14 @@ Open System Settings → Privacy & Security and allow your terminal app (Termina
 
 If something stops working later, come back here first.
 
+## Retired environments
+
+Older setups created separate environments in `~/orion/src/voice/.venv` and `~/orion/src/engine/.venv`. Both are retired. Everything runs from `~/.orion-venv`. If either old folder still exists, stop the engine and delete it after the shared environment works:
+
+```bash
+rm -rf ~/orion/src/voice/.venv ~/orion/src/engine/.venv
+```
+
 ## 1. Create the shared environment (once)
 
 ```bash
@@ -63,7 +71,7 @@ ollama list
 Terminal tab 1, the engine. Leave it open:
 
 ```bash
-~/orion/start_engine.sh
+~/orion/scripts/start_orion.sh
 ```
 
 If it says the engine is already running, that's fine. You don't need a second copy.
@@ -93,7 +101,7 @@ With the engine running:
 
 ## Troubleshooting
 
-- **"Can't reach the engine"**: the engine isn't running. Start it with `~/orion/start_engine.sh`.
+- **"Can't reach the engine"**: the engine isn't running. Start it with `~/orion/scripts/start_orion.sh`.
 - **"Port 8765 is held by another process"**: run `lsof -nP -iTCP:8765 -sTCP:LISTEN`, then `kill <PID>`.
 - **"SETUP REQUIRED"**: the message names the exact fix command. Run it.
 - **Screen answers are empty or fail**: check that `ollama serve` is running and `ollama list` shows `qwen2.5vl:7b`, and that Screen Recording is allowed for your terminal.

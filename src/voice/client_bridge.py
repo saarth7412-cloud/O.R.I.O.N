@@ -100,7 +100,7 @@ def send_command(prompt: str, include_screen: bool, url: str) -> str:
     except requests.ConnectionError as exc:
         raise BridgeError(
             f"Can't reach the engine at {url}.\n"
-            "Fix: start it with ~/orion/start_engine.sh"
+            "Fix: start it with ~/orion/scripts/start_orion.sh"
         ) from exc
     except requests.Timeout as exc:
         raise BridgeError(f"The engine took longer than {REQUEST_TIMEOUT_S}s to respond.") from exc

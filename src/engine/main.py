@@ -6,7 +6,13 @@ Endpoints:
   GET  /health    liveness + connected HUD client count
   POST /command   parses and routes one command, returns reply and action
   POST /state     voice bridge pushes a HUD state (listening, transcribing, ...)
+                  payload: {"state": str, "text": str = "", "source": str = "voice"}
+                  broadcast to /events as {"type": "state", "state", "text", "source"}
   WS   /events    broadcasts execution events to the HUD
+
+POST /command response: {"command_id", "status", "reply", "action", "output", "error"}
+  reply and output carry the same text. action is one of
+  builtin, open_app, shortcut, screen, chat.
 
 Routing, checked in this order:
   "help", "time", "date"         -> builtin, answered instantly, no model
@@ -84,7 +90,7 @@ class CommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: str = Field(min_length=1, max_length=64)
-    prompt: str = Field(min_length=1, max_length=8000)
+    prompt: str = Field(max_length=8000)  # may be blank: a silent turn is a no-op
     include_screen: bool = False
 
 
@@ -280,6 +286,18 @@ async def post_state(req: StateRequest) -> dict:
 @app.post("/command", response_model=CommandResponse)
 async def submit_command(req: CommandRequest) -> CommandResponse:
     command_id = uuid.uuid4().hex
+
+    if not req.prompt.strip():
+        # Silence, muted turns, or an empty transcript: nothing to do, not an error.
+        log.info("command %s ignored: blank prompt from %s", command_id, req.source)
+        return CommandResponse(
+            command_id=command_id,
+            status="COMPLETED",
+            reply="",
+            action="noop",
+            output="",
+        )
+
     log.info("command %s from %s (screen=%s)", command_id, req.source, req.include_screen)
 
     await hub.broadcast({

@@ -104,6 +104,15 @@ def check_bare_commands_rejected(base: str) -> None:
         record(f"bare '{word}' returns HTTP 400", r.status_code == 400, f"HTTP {r.status_code}")
 
 
+def check_silent_turns(base: str) -> None:
+    """Silence, a muted mic, or an empty transcript must never produce an error."""
+    for label, prompt in (("empty", ""), ("spaces", "   "), ("newline", "\n")):
+        r = post_command(base, prompt)
+        body = r.json() if r.ok else {}
+        ok = r.status_code == 200 and body.get("action") == "noop" and body.get("reply") == ""
+        record(f"silent turn ({label}) is a no-op, not an error", ok, f"HTTP {r.status_code}")
+
+
 def check_chat_fallback(base: str) -> None:
     r = post_command(base, "What is the capital of Japan?")
     if r.status_code == 503:
@@ -178,6 +187,7 @@ def main() -> int:
     if healthy:
         check_builtins(base)
         check_bare_commands_rejected(base)
+        check_silent_turns(base)
         check_chat_fallback(base)
         check_websocket(base)
         if args.screen:

@@ -16,3 +16,7 @@ models/
 
 # macOS
 .DS_Store
+
+# Swift build artifacts
+.build/
+.swiftpm/

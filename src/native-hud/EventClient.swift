@@ -1,10 +1,34 @@
 import Foundation
 
-/// Message schema sent by the Python backend.
+/// Connection settings. Kept outside the main actor so they can be read from anywhere.
+enum HUDConfig {
+    static let defaultPort = 8765
+    static let initialBackoff: TimeInterval = 1
+    static let maxBackoff: TimeInterval = 30
+
+    /// Where the HUD connects.
+    /// - ORION_EVENTS_URL: full WebSocket URL, if set (highest priority).
+    /// - ORION_PORT: port number, if set. Builds ws://127.0.0.1:<port>/events.
+    /// - Otherwise: ws://127.0.0.1:8765/events.
+    static var eventsURL: URL {
+        let env = ProcessInfo.processInfo.environment
+        if let full = env["ORION_EVENTS_URL"], let url = URL(string: full) {
+            return url
+        }
+        let port = env["ORION_PORT"].flatMap { Int($0) } ?? defaultPort
+        return URL(string: "ws://127.0.0.1:\(port)/events")!
+    }
+}
+
+/// One message from the backend.
+/// Standard messages carry `state`, `text`, and `source`.
+/// Engine event messages carry `type` (for example "hello" or "command.received").
 struct OrionEvent: Decodable {
-    let state: String
+    let state: String?
     let text: String?
     let source: String?
+    let type: String?
+    let service: String?
 }
 
 /// Keeps a WebSocket connection to the backend and pushes updates into the HUD.
@@ -12,15 +36,11 @@ struct OrionEvent: Decodable {
 @MainActor
 final class EventClient {
 
-    static let defaultURL = URL(string: "ws://127.0.0.1:8765/events")!
-    static let initialBackoff: TimeInterval = 1
-    static let maxBackoff: TimeInterval = 30
-
     private let url: URL
     private let model: HUDStatusModel
     private var loopTask: Task<Void, Never>?
 
-    init(url: URL = EventClient.defaultURL, model: HUDStatusModel) {
+    init(url: URL = HUDConfig.eventsURL, model: HUDStatusModel) {
         self.url = url
         self.model = model
     }
@@ -43,7 +63,7 @@ final class EventClient {
     /// Delay before retry attempt number `attempt` (1-based): 1s, 2s, 4s ... capped at 30s.
     static func backoffDelay(forAttempt attempt: Int) -> TimeInterval {
         let exponent = min(max(attempt - 1, 0), 10)
-        return min(initialBackoff * pow(2, Double(exponent)), maxBackoff)
+        return min(HUDConfig.initialBackoff * pow(2, Double(exponent)), HUDConfig.maxBackoff)
     }
 
     private func runLoop() async {
@@ -82,8 +102,8 @@ final class EventClient {
         }
     }
 
-    /// Announces this client to the server. Unlike sendPing, the async send throws on a dead
-    /// connection instead of waiting forever, so the reconnect logic always runs.
+    /// Announces this client to the server. The async send throws on a dead connection
+    /// instead of waiting forever, so the reconnect logic always runs.
     private func openConnection(_ socket: URLSessionWebSocketTask) async throws {
         try await socket.send(.string("{\"client\": \"orion-hud\"}"))
         NSLog("[O.R.I.O.N.] EventClient: connected to \(url.absoluteString)")
@@ -109,7 +129,7 @@ final class EventClient {
             let event = try JSONDecoder().decode(OrionEvent.self, from: data)
             model.apply(event)
         } catch {
-            NSLog("[O.R.I.O.N.] EventClient: ignored malformed message: \(raw)")
+            NSLog("[O.R.I.O.N.] EventClient: ignored unreadable message: \(raw)")
         }
     }
 }
